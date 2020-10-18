@@ -1,40 +1,98 @@
 #include "itype.h"
 
-#include <stdexcept>
+#include <cstdlib>
 
 #include "debug.h"
-#include "output.h"
+#include "item.h"
 #include "player.h"
+#include "ret_val.h"
 #include "translations.h"
+
+struct tripoint;
 
 std::string gunmod_location::name() const
 {
     // Yes, currently the name is just the translated id.
-    return _( _id.c_str() );
+    return _( _id );
 }
+
+std::string islot_book::recipe_with_description_t::name() const
+{
+    if( optional_name ) {
+        return optional_name->translated();
+    } else {
+        return recipe->result_name();
+    }
+}
+
+namespace io
+{
+template<>
+std::string enum_to_string<condition_type>( condition_type data )
+{
+    switch( data ) {
+        case condition_type::FLAG:
+            return "FLAG";
+        case condition_type::COMPONENT_ID:
+            return "COMPONENT_ID";
+        case condition_type::num_condition_types:
+            break;
+    }
+    debugmsg( "Invalid condition_type" );
+    abort();
+}
+} // namespace io
 
 std::string itype::nname( unsigned int quantity ) const
 {
     // Always use singular form for liquids.
     // (Maybe gases too?  There are no gases at the moment)
-    if( phase == LIQUID ) {
+    if( phase == phase_id::LIQUID ) {
         quantity = 1;
     }
-    return ngettext( name.c_str(), name_plural.c_str(), quantity );
+    return name.translated( quantity );
 }
 
-long itype::charges_per_volume( const units::volume &vol ) const
+int itype::charges_per_volume( const units::volume &vol ) const
 {
     if( volume == 0_ml ) {
-        return item::INFINITE_CHARGES; // TODO: items should not have 0 volume at all!
+        // TODO: items should not have 0 volume at all!
+        return item::INFINITE_CHARGES;
     }
-    return ( stackable ? stack_size : 1 ) * vol / volume;
+    return ( count_by_charges() ? stack_size : 1 ) * vol / volume;
 }
 
 // Members of iuse struct, which is slowly morphing into a class.
 bool itype::has_use() const
 {
     return !use_methods.empty();
+}
+
+bool itype::has_flag( const std::string &flag ) const
+{
+    return has_flag( flag_str_id( flag ) );
+}
+
+bool itype::has_flag( const flag_str_id &flag ) const
+{
+    // whichever collection is not empty is used
+    // if both are empty, either will do
+    // (see `item_tags_str_tmp` and Item_factory::finalize_post)
+    if( item_tags_str_tmp.size() > item_tags.size() ) {
+        return item_tags_str_tmp.count( flag );
+    } else {
+        return has_flag( flag.id() );
+    }
+}
+
+bool itype::has_flag( const flag_id &flag ) const
+{
+    return item_tags.count( flag );
+}
+
+const itype::FlagsSetType &itype::get_flags() const
+{
+    return item_tags;
 }
 
 bool itype::can_use( const std::string &iuse_name ) const
@@ -44,17 +102,17 @@ bool itype::can_use( const std::string &iuse_name ) const
 
 const use_function *itype::get_use( const std::string &iuse_name ) const
 {
-    auto iter = use_methods.find( iuse_name );
+    const auto iter = use_methods.find( iuse_name );
     return iter != use_methods.end() ? &iter->second : nullptr;
 }
 
-long itype::tick( player &p, item &it, const tripoint &pos ) const
+int itype::tick( player &p, item &it, const tripoint &pos ) const
 {
     // Note: can go higher than current charge count
     // Maybe should move charge decrementing here?
     int charges_to_use = 0;
-    for( auto &method : use_methods ) {
-        int val = method.second.call( p, it, true, pos );
+    for( const auto &method : use_methods ) {
+        const int val = method.second.call( p, it, true, pos );
         if( charges_to_use < 0 || val < 0 ) {
             charges_to_use = -1;
         } else {
@@ -65,7 +123,7 @@ long itype::tick( player &p, item &it, const tripoint &pos ) const
     return charges_to_use;
 }
 
-long itype::invoke( player &p, item &it, const tripoint &pos ) const
+int itype::invoke( player &p, item &it, const tripoint &pos ) const
 {
     if( !has_use() ) {
         return 0;
@@ -73,15 +131,16 @@ long itype::invoke( player &p, item &it, const tripoint &pos ) const
     return invoke( p, it, pos, use_methods.begin()->first );
 }
 
-long itype::invoke( player &p, item &it, const tripoint &pos, const std::string &iuse_name ) const
+int itype::invoke( player &p, item &it, const tripoint &pos, const std::string &iuse_name ) const
 {
     const use_function *use = get_use( iuse_name );
     if( use == nullptr ) {
         debugmsg( "Tried to invoke %s on a %s, which doesn't have this use_function",
-                  iuse_name.c_str(), nname( 1 ).c_str() );
+                  iuse_name, nname( 1 ) );
         return 0;
     }
 
+    p.invalidate_weight_carried_cache();
     const auto ret = use->can_call( p, it, false, pos );
 
     if( !ret.success() ) {
@@ -95,4 +154,21 @@ long itype::invoke( player &p, item &it, const tripoint &pos, const std::string 
 std::string gun_type_type::name() const
 {
     return pgettext( "gun_type_type", name_.c_str() );
+}
+
+bool itype::can_have_charges() const
+{
+    if( count_by_charges() ) {
+        return true;
+    }
+    if( tool && tool->max_charges > 0 ) {
+        return true;
+    }
+    if( gun && gun->clip > 0 ) {
+        return true;
+    }
+    if( has_flag( "CAN_HAVE_CHARGES" ) ) {
+        return true;
+    }
+    return false;
 }
